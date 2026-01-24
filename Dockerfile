@@ -9,7 +9,8 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 COPY package*.json ./
-RUN npm ci --only=production
+# Use npm install instead of npm ci
+RUN npm install --production
 
 COPY . .
 
