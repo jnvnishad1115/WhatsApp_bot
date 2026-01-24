@@ -23,59 +23,92 @@ const config = {
     port: process.env.PORT || 3000
 };
 
-// ==================== MONGOOSE SCHEMAS & MODELS ====================
-const groupSchema = new mongoose.Schema({
-    groupId: { type: String, required: true, unique: true },
-    name: String,
-    settings: {
-        welcome: { type: Boolean, default: false },
-        goodbye: { type: Boolean, default: false },
-        antilink: { type: Boolean, default: false },
-        antibadword: { type: Boolean, default: false },
-        adminOnly: { type: Boolean, default: false },
-        mute: { type: Boolean, default: false }
-    },
-    admins: [String],
-    bannedUsers: [String],
-    createdAt: { type: Date, default: Date.now }
-});
+console.log('🚀 Starting WhatsApp Bot...');
+console.log(`📱 Owner: ${config.ownerJid || 'Not set'}`);
+console.log(`🤖 AI Key: ${config.openrouterKey ? '✅ Set' : '❌ Not set'}`);
 
-const userSchema = new mongoose.Schema({
-    userId: { type: String, required: true, unique: true },
-    name: String,
-    warnings: { type: Number, default: 0 },
-    lastCommand: Date,
-    commandCount: { type: Number, default: 0 }
-});
-
-const gameSchema = new mongoose.Schema({
-    gameId: String,
-    groupId: String,
-    players: [String],
-    board: mongoose.Schema.Types.Mixed,
-    status: { type: String, default: 'active' },
-    createdAt: { type: Date, default: Date.now }
-});
-
-const GroupModel = mongoose.model('Group', groupSchema);
-const UserModel = mongoose.model('User', userSchema);
-const GameModel = mongoose.model('Game', gameSchema);
-
-// ==================== MONGODB CONNECTION ====================
+// ==================== MONGODB (With Fallback) ====================
+let dbReady = false;
 async function connectMongoDB() {
     try {
         await mongoose.connect(config.mongodbUri);
         console.log('✅ MongoDB connected successfully');
+        dbReady = true;
     } catch (error) {
-        console.error('❌ MongoDB connection error:', error);
-        process.exit(1);
+        console.warn('⚠️  MongoDB not available. Using memory storage.');
+        console.warn('   Data will be lost on restart!');
+        dbReady = false;
     }
 }
+
+// ==================== MONGOOSE MODELS (Only if DB works) ====================
+let GroupModel, UserModel, GameModel;
+if (dbReady) {
+    const groupSchema = new mongoose.Schema({
+        groupId: { type: String, required: true, unique: true },
+        name: String,
+        settings: {
+            welcome: { type: Boolean, default: false },
+            goodbye: { type: Boolean, default: false },
+            antilink: { type: Boolean, default: false },
+            antibadword: { type: Boolean, default: false },
+            adminOnly: { type: Boolean, default: false },
+            mute: { type: Boolean, default: false }
+        },
+        admins: [String],
+        bannedUsers: [String],
+        createdAt: { type: Date, default: Date.now }
+    });
+
+    const userSchema = new mongoose.Schema({
+        userId: { type: String, required: true, unique: true },
+        name: String,
+        warnings: { type: Number, default: 0 },
+        lastCommand: Date,
+        commandCount: { type: Number, default: 0 }
+    });
+
+    GroupModel = mongoose.model('Group', groupSchema);
+    UserModel = mongoose.model('User', userSchema);
+}
+
+// ==================== MEMORY STORAGE (Fallback) ====================
+const memoryStorage = {
+    groups: new Map(),
+    users: new Map(),
+    async getGroup(groupId) {
+        if (dbReady) {
+            return await GroupModel.findOne({ groupId }) || this.groups.get(groupId);
+        }
+        return this.groups.get(groupId) || {
+            settings: { welcome: false, goodbye: false, antilink: false },
+            admins: [],
+            bannedUsers: []
+        };
+    },
+    async saveGroup(groupId, data) {
+        if (dbReady) {
+            await GroupModel.findOneAndUpdate({ groupId }, data, { upsert: true, new: true });
+        } else {
+            this.groups.set(groupId, data);
+        }
+    },
+    async updateUser(userId) {
+        if (dbReady) {
+            await UserModel.findOneAndUpdate(
+                { userId },
+                { lastCommand: new Date(), $inc: { commandCount: 1 } },
+                { upsert: true, new: true }
+            );
+        } else {
+            this.users.set(userId, { lastCommand: new Date(), commandCount: (this.users.get(userId)?.commandCount || 0) + 1 });
+        }
+    }
+};
 
 // ==================== UTILITIES ====================
 const logger = P({ level: 'silent' });
 const rateLimits = new Map();
-const games = new Map();
 
 function checkRateLimit(userId) {
     const now = Date.now();
@@ -112,6 +145,7 @@ class OpenRouterClient {
         if (!this.apiKey) return '❌ OpenRouter API key not configured!';
         
         try {
+            console.log(`🤖 AI Request: ${prompt.substring(0, 50)}...`);
             const response = await axios.post(`${this.baseURL}/chat/completions`, {
                 model,
                 messages: [{ role: 'user', content: prompt }]
@@ -141,52 +175,56 @@ const ai = new OpenRouterClient(config.openrouterKey);
 class CommandHandler {
     constructor(sock) {
         this.sock = sock;
+        this.isReady = true;
     }
     
     async handle(msg) {
-        const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
-        if (!text.startsWith(config.prefix)) return;
-        
-        const args = text.slice(config.prefix.length).trim().split(/ +/);
-        const command = args.shift().toLowerCase();
-        
-        const from = msg.key.remoteJid;
-        const sender = msg.key.participant || from;
-        
-        // Update user in DB
-        await this.updateUser(sender);
-        
-        // Rate limit check
-        if (!checkRateLimit(sender)) {
-            return this.sock.sendMessage(from, { text: '⏳ Rate limit exceeded! Wait 1 minute.' });
-        }
-        
-        // Get command method
-        const method = `cmd${command.charAt(0).toUpperCase() + command.slice(1)}`;
-        if (!this[method]) {
-            return this.sock.sendMessage(from, { text: '❌ Unknown command! Type .help' });
-        }
-        
-        const isGroup = isGroup(from);
-        const groupMetadata = isGroup ? await this.sock.groupMetadata(from) : null;
-        
         try {
-            await this[method](from, sender, args, { isGroup, groupMetadata, msg });
+            const text = msg.message?.conversation || msg.message?.extendedTextMessage?.text || '';
+            console.log(`📩 Message: ${text}`);
+            
+            if (!text.startsWith(config.prefix)) return;
+            
+            const args = text.slice(config.prefix.length).trim().split(/ +/);
+            const command = args.shift().toLowerCase();
+            
+            const from = msg.key.remoteJid;
+            const sender = msg.key.participant || from;
+            
+            console.log(`📝 Command: ${command} from ${sender}`);
+            
+            // Rate limit check
+            if (!checkRateLimit(sender)) {
+                return this.sock.sendMessage(from, { text: '⏳ Rate limit exceeded! Wait 1 minute.' });
+            }
+            
+            // Update user
+            await memoryStorage.updateUser(sender);
+            
+            // Get command method
+            const method = `cmd${command.charAt(0).toUpperCase() + command.slice(1)}`;
+            if (!this[method]) {
+                return this.sock.sendMessage(from, { text: '❌ Unknown command! Type .help' });
+            }
+            
+            const isGroup = isGroup(from);
+            const groupMetadata = isGroup ? await this.sock.groupMetadata(from) : null;
+            const participants = groupMetadata?.participants || [];
+            
+            // Check permissions for admin commands
+            const isSenderAdmin = isGroup ? isAdmin(participants, sender) || isOwner(sender) : false;
+            
+            await this[method](from, sender, args, { 
+                isGroup, 
+                groupMetadata, 
+                participants, 
+                isSenderAdmin,
+                msg 
+            });
+            
         } catch (e) {
-            console.error(`Command error: ${e}`);
-            this.sock.sendMessage(from, { text: '❌ Error executing command!' });
-        }
-    }
-    
-    async updateUser(userId) {
-        try {
-            await UserModel.findOneAndUpdate(
-                { userId },
-                { lastCommand: new Date(), $inc: { commandCount: 1 } },
-                { upsert: true, new: true }
-            );
-        } catch (e) {
-            console.error('User update error:', e);
+            console.error(`❌ Command error: ${e.message}`);
+            this.sock.sendMessage(msg.key.remoteJid, { text: '❌ Error executing command!' });
         }
     }
     
@@ -206,6 +244,7 @@ class CommandHandler {
 ╚═══════════════════╝
         `;
         await this.sock.sendMessage(from, { text: help });
+        console.log("✅ Help command executed");
     }
     
     async cmdPing(from, sender, args) {
@@ -213,31 +252,44 @@ class CommandHandler {
         await this.sock.sendMessage(from, { text: '📡 Pinging...' });
         const latency = Date.now() - start;
         await this.sock.sendMessage(from, { text: `🏓 Pong!\n*Latency:* ${latency}ms` });
+        console.log("✅ Ping command executed");
     }
     
     async cmdAlive(from, sender, args) {
         const uptime = process.uptime();
-        const dbStatus = mongoose.connection.readyState === 1 ? '✅ Connected' : '❌ Disconnected';
+        const dbStatus = dbReady ? '✅ Connected' : '⚠️ Memory Mode';
         await this.sock.sendMessage(from, { text: `✅ Bot is online!\n*Uptime:* ${Math.floor(uptime)}s\n*Database:* ${dbStatus}` });
     }
     
     async cmdOwner(from, sender, args) {
-        await this.sock.sendMessage(from, { text: `👑 *Owner:* ${config.ownerJid.split('@')[0]}` });
+        await this.sock.sendMessage(from, { text: `👑 *Owner:* ${config.ownerJid || 'Not set'}` });
     }
     
     async cmdJoke(from, sender, args) {
-        const { data } = await axios.get('https://official-joke-api.appspot.com/random_joke');
-        await this.sock.sendMessage(from, { text: `${data.setup}\n\n${data.punchline}` });
+        try {
+            const { data } = await axios.get('https://official-joke-api.appspot.com/random_joke');
+            await this.sock.sendMessage(from, { text: `${data.setup}\n\n${data.punchline}` });
+        } catch {
+            await this.sock.sendMessage(from, { text: '❌ Could not fetch joke' });
+        }
     }
     
     async cmdQuote(from, sender, args) {
-        const { data } = await axios.get('https://api.quotable.io/random');
-        await this.sock.sendMessage(from, { text: `"${data.content}"\n— ${data.author}` });
+        try {
+            const { data } = await axios.get('https://api.quotable.io/random');
+            await this.sock.sendMessage(from, { text: `"${data.content}"\n— ${data.author}` });
+        } catch {
+            await this.sock.sendMessage(from, { text: '❌ Could not fetch quote' });
+        }
     }
     
     async cmdFact(from, sender, args) {
-        const { data } = await axios.get('https://uselessfacts.jsph.pl/random.json?language=en');
-        await this.sock.sendMessage(from, { text: `🤓 *Fact:* ${data.text}` });
+        try {
+            const { data } = await axios.get('https://uselessfacts.jsph.pl/random.json?language=en');
+            await this.sock.sendMessage(from, { text: `🤓 *Fact:* ${data.text}` });
+        } catch {
+            await this.sock.sendMessage(from, { text: '❌ Could not fetch fact' });
+        }
     }
     
     async cmd8Ball(from, sender, args) {
@@ -253,26 +305,26 @@ class CommandHandler {
             return this.sock.sendMessage(from, { text: '❌ This is not a group!' });
         }
         
-        const group = await GroupModel.findOne({ groupId: from });
+        const group = await memoryStorage.getGroup(from);
         const info = `
 👥 *Group Info*
 Name: ${groupMetadata.subject}
 ID: ${from.split('@')[0]}
-Welcome: ${group?.settings?.welcome ? '✅' : '❌'}
-Goodbye: ${group?.settings?.goodbye ? '✅' : '❌'}
-Anti-link: ${group?.settings?.antilink ? '✅' : '❌'}
-Banned: ${group?.bannedUsers?.length || 0} users
+Welcome: ${group.settings.welcome ? '✅' : '❌'}
+Goodbye: ${group.settings.goodbye ? '✅' : '❌'}
+Anti-link: ${group.settings.antilink ? '✅' : '❌'}
+Banned: ${group.bannedUsers.length} users
         `;
         await this.sock.sendMessage(from, { text: info });
     }
     
     // ==================== ADMIN COMMANDS ====================
-    async cmdBan(from, sender, args, { isGroup, groupMetadata, msg }) {
+    async cmdBan(from, sender, args, { isGroup, participants, msg }) {
         if (!isGroup) return this.sock.sendMessage(from, { text: '❌ Only in groups!' });
         
-        const group = await GroupModel.findOne({ groupId: from });
-        const isSenderAdmin = group?.admins?.includes(sender) || isOwner(sender);
-        const isBotAdmin = group?.admins?.includes(this.sock.user.id);
+        const group = await memoryStorage.getGroup(from);
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        const isBotAdmin = isAdmin(participants, this.sock.user.id);
         
         if (!isSenderAdmin) return this.sock.sendMessage(from, { text: '❌ Only admins!' });
         if (!isBotAdmin) return this.sock.sendMessage(from, { text: '❌ Bot must be admin!' });
@@ -280,143 +332,120 @@ Banned: ${group?.bannedUsers?.length || 0} users
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
         if (!mentioned.length) return this.sock.sendMessage(from, { text: '❌ Tag a user!' });
         
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { $addToSet: { bannedUsers: mentioned[0] } },
-            { upsert: true, new: true }
-        );
+        group.bannedUsers.push(mentioned[0]);
+        await memoryStorage.saveGroup(from, group);
         
         await this.sock.sendMessage(from, { text: '✅ User banned!' });
     }
     
-    async cmdKick(from, sender, args, { isGroup, msg }) {
-        await this.cmdBan(from, sender, args, { isGroup, msg });
+    async cmdKick(from, sender, args, { isGroup, participants, msg }) {
+        await this.cmdBan(from, sender, args, { isGroup, participants, msg });
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
         if (mentioned.length) {
             await this.sock.groupParticipantsUpdate(from, mentioned, 'remove');
         }
     }
     
-    async cmdPromote(from, sender, args, { isGroup, msg }) {
+    async cmdPromote(from, sender, args, { isGroup, participants, msg }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
         if (!mentioned.length) return;
         
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { $addToSet: { admins: mentioned[0] } },
-            { upsert: true, new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.admins.push(mentioned[0]);
+        await memoryStorage.saveGroup(from, group);
         
         await this.sock.sendMessage(from, { text: '✅ User promoted!' });
     }
     
-    async cmdDemote(from, sender, args, { isGroup, msg }) {
+    async cmdDemote(from, sender, args, { isGroup, participants, msg }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
         const mentioned = msg.message?.extendedTextMessage?.contextInfo?.mentionedJid || [];
         if (!mentioned.length) return;
         
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { $pull: { admins: mentioned[0] } },
-            { new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.admins = group.admins.filter(id => id !== mentioned[0]);
+        await memoryStorage.saveGroup(from, group);
         
         await this.sock.sendMessage(from, { text: '✅ User demoted!' });
     }
     
-    async cmdMute(from, sender, args, { isGroup, msg }) {
+    async cmdMute(from, sender, args, { isGroup, participants }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { 'settings.mute': true },
-            { upsert: true, new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.settings.mute = true;
+        await memoryStorage.saveGroup(from, group);
         
         await this.sock.sendMessage(from, { text: '🔇 Group muted for 1 hour' });
         setTimeout(async () => {
-            await GroupModel.findOneAndUpdate(
-                { groupId: from },
-                { 'settings.mute': false },
-                { new: true }
-            );
+            group.settings.mute = false;
+            await memoryStorage.saveGroup(from, group);
         }, 3600000);
     }
     
-    async cmdUnmute(from, sender, args, { isGroup, msg }) {
+    async cmdUnmute(from, sender, args, { isGroup, participants }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { 'settings.mute': false },
-            { new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.settings.mute = false;
+        await memoryStorage.saveGroup(from, group);
         
         await this.sock.sendMessage(from, { text: '🔊 Group unmuted!' });
     }
     
-    async cmdClear(from, sender, args, { isGroup, msg }) {
+    async cmdClear(from, sender, args, { isGroup, participants }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
         await this.sock.sendMessage(from, { text: '✅ Cleared last 100 messages (simulated)' });
     }
     
-    async cmdWelcome(from, sender, args, { isGroup, msg }) {
+    async cmdWelcome(from, sender, args, { isGroup, participants }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
-        const current = group?.settings?.welcome || false;
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { 'settings.welcome': !current },
-            { upsert: true, new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.settings.welcome = !group.settings.welcome;
+        await memoryStorage.saveGroup(from, group);
         
-        await this.sock.sendMessage(from, { text: `✅ Welcome ${!current ? 'enabled' : 'disabled'}!` });
+        await this.sock.sendMessage(from, { text: `✅ Welcome ${group.settings.welcome ? 'enabled' : 'disabled'}!` });
     }
     
-    async cmdGoodbye(from, sender, args, { isGroup, msg }) {
+    async cmdGoodbye(from, sender, args, { isGroup, participants }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
-        const current = group?.settings?.goodbye || false;
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { 'settings.goodbye': !current },
-            { upsert: true, new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.settings.goodbye = !group.settings.goodbye;
+        await memoryStorage.saveGroup(from, group);
         
-        await this.sock.sendMessage(from, { text: `✅ Goodbye ${!current ? 'enabled' : 'disabled'}!` });
+        await this.sock.sendMessage(from, { text: `✅ Goodbye ${group.settings.goodbye ? 'enabled' : 'disabled'}!` });
     }
     
-    async cmdAntilink(from, sender, args, { isGroup, msg }) {
+    async cmdAntilink(from, sender, args, { isGroup, participants }) {
         if (!isGroup) return;
-        const group = await GroupModel.findOne({ groupId: from });
-        if (!group?.admins?.includes(sender) && !isOwner(sender)) return;
+        const isSenderAdmin = isAdmin(participants, sender) || isOwner(sender);
+        if (!isSenderAdmin) return;
         
-        const current = group?.settings?.antilink || false;
-        await GroupModel.findOneAndUpdate(
-            { groupId: from },
-            { 'settings.antilink': !current },
-            { upsert: true, new: true }
-        );
+        const group = await memoryStorage.getGroup(from);
+        group.settings.antilink = !group.settings.antilink;
+        await memoryStorage.saveGroup(from, group);
         
-        await this.sock.sendMessage(from, { text: `✅ Anti-link ${!current ? 'enabled' : 'disabled'}!` });
+        await this.sock.sendMessage(from, { text: `✅ Anti-link ${group.settings.antilink ? 'enabled' : 'disabled'}!` });
     }
     
     // ==================== AI COMMANDS ====================
@@ -538,14 +567,11 @@ Banned: ${group?.bannedUsers?.length || 0} users
         }
         
         const gameId = `${from}_${Date.now()}`;
-        const game = new GameModel({
-            gameId,
-            groupId: from,
+        games.set(gameId, {
             players: [sender],
             board: ['', '', '', '', '', '', '', '', ''],
-            status: 'waiting'
+            turn: sender
         });
-        await game.save();
         
         const board = `1️⃣2️⃣3️⃣\n4️⃣5️⃣6️⃣\n7️⃣8️⃣9️⃣`;
         await this.sock.sendMessage(from, { text: `🎮 TicTacToe started! @${sender.split('@')[0]}\n${board}\n\nUse .play <1-9>` });
@@ -558,9 +584,13 @@ Banned: ${group?.bannedUsers?.length || 0} users
     }
     
     async cmdTrivia(from, sender, args) {
-        const { data } = await axios.get('https://opentdb.com/api.php?amount=1');
-        const question = data.results[0];
-        await this.sock.sendMessage(from, { text: `❓ ${question.question}\n\nA) ${question.incorrect_answers[0]}\nB) ${question.correct_answer}` });
+        try {
+            const { data } = await axios.get('https://opentdb.com/api.php?amount=1');
+            const question = data.results[0];
+            await this.sock.sendMessage(from, { text: `❓ ${question.question}\n\nA) ${question.incorrect_answers[0]}\nB) ${question.correct_answer}` });
+        } catch {
+            await this.sock.sendMessage(from, { text: '❌ Could not fetch trivia' });
+        }
     }
     
     async cmdTruth(from, sender, args) {
@@ -580,6 +610,11 @@ async function startBot() {
     await connectMongoDB();
     
     console.log('🚀 Starting WhatsApp Bot...');
+    
+    // Create session directory if not exists
+    try {
+        await fs.mkdir(config.sessionDir, { recursive: true });
+    } catch {}
     
     const { state, saveCreds } = await useMultiFileAuthState(config.sessionDir);
     const { version } = await fetchLatestBaileysVersion();
@@ -613,6 +648,7 @@ async function startBot() {
             }
         } else if (connection === 'open') {
             console.log('✅ Bot connected successfully!');
+            console.log(`🤖 Bot JID: ${sock.user.id}`);
         }
     });
     
@@ -623,20 +659,21 @@ async function startBot() {
         const msg = messages[0];
         if (!msg.message || msg.key.fromMe) return;
         
+        console.log(`📩 New message from ${msg.key.remoteJid}`);
         await cmdHandler.handle(msg);
     });
     
     // Group events
     sock.ev.on('group-participants.update', async (update) => {
-        const group = await GroupModel.findOne({ groupId: update.id });
+        const group = await memoryStorage.getGroup(update.id);
         
-        if (update.action === 'add' && group?.settings?.welcome) {
+        if (update.action === 'add' && group.settings.welcome) {
             for (const participant of update.participants) {
                 const metadata = await sock.groupMetadata(update.id);
-                const text = `👋 Welcome @${participant.split('@')[0]} to ${metadata.subject}!\n\nUse .help to see available commands.`;
+                const text = `👋 Welcome @${participant.split('@')[0]} to ${metadata.subject}!`;
                 await sock.sendMessage(update.id, { text, mentions: [participant] });
             }
-        } else if (update.action === 'remove' && group?.settings?.goodbye) {
+        } else if (update.action === 'remove' && group.settings.goodbye) {
             for (const participant of update.participants) {
                 await sock.sendMessage(update.id, { text: `👋 Goodbye @${participant.split('@')[0]}!` });
             }
@@ -653,4 +690,7 @@ http.createServer((req, res) => {
 });
 
 // ==================== START BOT ====================
-startBot().catch(console.error);
+startBot().catch(e => {
+    console.error('❌ Fatal error:', e);
+    process.exit(1);
+});
