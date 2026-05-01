@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config from environment variables ───────────────────
-PI_ID         = 30779174
+API_ID         = 30779174
 API_HASH       = "d5e27c8c4e30129238716a83df45b1f8"
 SESSION_STRING = "1BVtsOGoBu7kTY6aj2tLpZfO9TsSKk4bdkC81il4_XgtSjvBxvdqMA2ydCLruFhwbXuOBMyNVyHj7FNEUyKqI3MtDQRAZdW0wZ2AMSamPrnOiPajxbF0zBSzjT8aqeaNnzfMST05bo8vvlAaK9ln7OWltRXeNGmFmtyyZ76-Xwd2eMgfdQyaqHTfjvKFdP2Haj3npvPXTW1_fAYk6whrnmNqNCOu3ScHOv2hrdj01oi10iGe_ntFlwrPDCzEIJmXurDV_paZXOfHoIkR0lL62Mvc5NuKw9v7k3QdOctrlwxrqO4ymS-MwavED3Azbdr7Hzk2C-RWmD4__dJ7z19aJeOJwYdZ2XKM="
 AUTO_REPLY_MESSAGE = os.environ.get(
