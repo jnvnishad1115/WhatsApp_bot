@@ -28,9 +28,9 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ─── Config from environment variables ───────────────────
-API_ID         = 30779174
-API_HASH       = "d5e27c8c4e30129238716a83df45b1f8"
-SESSION_STRING = "1BVtsOIwBu3T9i2aL6z86Ory4gxwjNvIN4cYWZgNUP901zXoeWFjxf3hpc5Sw6cAmzjaIWB8ZE-CUx4kMQlc8aXNCf2iUrkXSocld3ODqREko6KuNxeL2mV4LjcgJlffBlYWq-fH_I0B_raQA9FvdMThiMDjyiw7kHh_UGJTHn1a4LV2822WoD2enV0W5thV0KXLZPsziJnTmdIiBMxiScBWI9kprEeDujVBttvl6knz3wLd4gbSm9BpxLEtInIJFu0uUS2ALRGQ0bGkVrHMFWw5hEkkeWuA9RhBN1CRy24ohjg7LTx5KoEWSoo5kig43t7UjHX-fTkOcX1scMRFSS8b4vZSHc94="
+API_ID         = 30261926
+API_HASH       = "53043316af1299c968ac061785c08b6d"
+SESSION_STRING = "1AZWarzoBu4q8lZYfuAfQmWnQBgsNREXfocxkAHcj56QfguM6RxPMaYuEt-84_FQ8E2Vi47MoTtl7ezDXNbfelaJVaD1FXyjtZbeF4WMGJb4z2fV6iL5ujj5tpkGVFHkzT80Cg-nBuaiGOr7kgGnml9LGWzWg9gYwP8blyKuUW2TSGHWcP25QUAtR9atrX23QsaStM-391bwHVmFCkUOUXKS2t4Vsu-fX3UTuHdBQgJO22hNbcBXbXjgGmosq2SOStIlhjK84Ze8jpdMbwoxBTYPwX7fMip83-0sdV2co0_SUA0ERtUTphtc-NHfzVVCuk70NQOhgcm2FL-NmGlqx17Im2us6ygs="
 AUTO_REPLY_MESSAGE = os.environ.get(
     "AUTO_REPLY_MSG",
     "👋 Hey! I'm currently unavailable.\nI'll get back to you as soon as possible. 🙏"
